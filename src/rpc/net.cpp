@@ -23,14 +23,12 @@
 #include <rpc/server_util.h>
 #include <rpc/util.h>
 #include <sync.h>
-#include <timedata.h>
 #include <util/chaintype.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
-#include <warnings.h>
 
 #include <optional>
 
@@ -239,7 +237,7 @@ static RPCHelpMan getpeerinfo()
         obj.pushKV("bytessent", stats.nSendBytes);
         obj.pushKV("bytesrecv", stats.nRecvBytes);
         obj.pushKV("conntime", count_seconds(stats.m_connected));
-        obj.pushKV("timeoffset", stats.nTimeOffset);
+        obj.pushKV("timeoffset", Ticks<std::chrono::seconds>(statestats.time_offset));
         if (stats.m_last_ping_time > 0us) {
             obj.pushKV("pingtime", Ticks<SecondsDouble>(stats.m_last_ping_time));
         }
@@ -322,7 +320,7 @@ static RPCHelpMan addnode()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    const std::string command{request.params[1].get_str()};
+    const auto command{self.Arg<std::string>("command")};
     if (command != "onetry" && command != "add" && command != "remove") {
         throw std::runtime_error(
             self.ToString());
@@ -331,9 +329,9 @@ static RPCHelpMan addnode()
     NodeContext& node = EnsureAnyNodeContext(request.context);
     CConnman& connman = EnsureConnman(node);
 
-    const std::string node_arg{request.params[0].get_str()};
+    const auto node_arg{self.Arg<std::string>("node")};
     bool node_v2transport = connman.GetLocalServices() & NODE_P2P_V2;
-    bool use_v2transport = self.MaybeArg<bool>(2).value_or(node_v2transport);
+    bool use_v2transport = self.MaybeArg<bool>("v2transport").value_or(node_v2transport);
 
     if (use_v2transport && !node_v2transport) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: v2transport requested but not enabled (see -v2transport)");
@@ -658,7 +656,14 @@ static RPCHelpMan getnetworkinfo()
                                 {RPCResult::Type::NUM, "score", "relative score"},
                             }},
                         }},
-                        {RPCResult::Type::STR, "warnings", "any network and blockchain warnings"},
+                        (IsDeprecatedRPCEnabled("warnings") ?
+                            RPCResult{RPCResult::Type::STR, "warnings", "any network and blockchain warnings (DEPRECATED)"} :
+                            RPCResult{RPCResult::Type::ARR, "warnings", "any network and blockchain warnings (run with `-deprecatedrpc=warnings` to return the latest warning as a single string)",
+                            {
+                                {RPCResult::Type::STR, "", "warning"},
+                            }
+                            }
+                        ),
                     }
                 },
                 RPCExamples{
@@ -679,9 +684,10 @@ static RPCHelpMan getnetworkinfo()
         obj.pushKV("localservicesnames", GetServicesNames(services));
     }
     if (node.peerman) {
-        obj.pushKV("localrelay", !node.peerman->IgnoresIncomingTxs());
+        auto peerman_info{node.peerman->GetInfo()};
+        obj.pushKV("localrelay", !peerman_info.ignores_incoming_txs);
+        obj.pushKV("timeoffset", Ticks<std::chrono::seconds>(peerman_info.median_outbound_time_offset));
     }
-    obj.pushKV("timeoffset",    GetTimeOffset());
     if (node.connman) {
         obj.pushKV("networkactive", node.connman->GetNetworkActive());
         obj.pushKV("connections", node.connman->GetNodeCount(ConnectionDirection::Both));
@@ -691,8 +697,8 @@ static RPCHelpMan getnetworkinfo()
     obj.pushKV("networks",      GetNetworksInfo());
     if (node.mempool) {
         // Those fields can be deprecated, to be replaced by the getmempoolinfo fields
-        obj.pushKV("relayfee", ValueFromAmount(node.mempool->m_min_relay_feerate.GetFeePerK()));
-        obj.pushKV("incrementalfee", ValueFromAmount(node.mempool->m_incremental_relay_feerate.GetFeePerK()));
+        obj.pushKV("relayfee", ValueFromAmount(node.mempool->m_opts.min_relay_feerate.GetFeePerK()));
+        obj.pushKV("incrementalfee", ValueFromAmount(node.mempool->m_opts.incremental_relay_feerate.GetFeePerK()));
     }
     UniValue localAddresses(UniValue::VARR);
     {
@@ -707,7 +713,7 @@ static RPCHelpMan getnetworkinfo()
         }
     }
     obj.pushKV("localaddresses", localAddresses);
-    obj.pushKV("warnings",       GetWarnings(false).original);
+    obj.pushKV("warnings", GetNodeWarnings(IsDeprecatedRPCEnabled("warnings")));
     return obj;
 },
     };

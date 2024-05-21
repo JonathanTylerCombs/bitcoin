@@ -26,9 +26,15 @@ import sys
 import tempfile
 import re
 import logging
-import unittest
 
 os.environ["REQUIRE_WALLET_TYPE_SET"] = "1"
+
+# Minimum amount of space to run the tests.
+MIN_FREE_SPACE = 1.1 * 1024 * 1024 * 1024
+# Additional space to run an extra job.
+ADDITIONAL_SPACE_PER_JOB = 100 * 1024 * 1024
+# Minimum amount of space required for --nocleanup
+MIN_NO_CLEANUP_SPACE = 12 * 1024 * 1024 * 1024
 
 # Formatting. Default colors to empty strings.
 DEFAULT, BOLD, GREEN, RED = ("", ""), ("", ""), ("", ""), ("", "")
@@ -70,22 +76,7 @@ if platform.system() != 'Windows' or sys.getwindowsversion() >= (10, 0, 14393): 
 TEST_EXIT_PASSED = 0
 TEST_EXIT_SKIPPED = 77
 
-# List of framework modules containing unit tests. Should be kept in sync with
-# the output of `git grep unittest.TestCase ./test/functional/test_framework`
-TEST_FRAMEWORK_MODULES = [
-    "address",
-    "crypto.bip324_cipher",
-    "blocktools",
-    "crypto.chacha20",
-    "crypto.ellswift",
-    "key",
-    "messages",
-    "crypto.muhash",
-    "crypto.poly1305",
-    "crypto.ripemd160",
-    "script",
-    "segwit_addr",
-]
+TEST_FRAMEWORK_UNIT_TESTS = 'feature_framework_unit_tests.py'
 
 EXTENDED_SCRIPTS = [
     # These tests are not run by default.
@@ -192,6 +183,8 @@ BASE_SCRIPTS = [
     'mempool_resurrect.py',
     'wallet_txn_doublespend.py --mineblock',
     'tool_wallet.py --legacy-wallet',
+    'tool_wallet.py --legacy-wallet --bdbro',
+    'tool_wallet.py --legacy-wallet --bdbro --swap-bdb-endian',
     'tool_wallet.py --descriptors',
     'tool_signet_miner.py --legacy-wallet',
     'tool_signet_miner.py --descriptors',
@@ -199,6 +192,8 @@ BASE_SCRIPTS = [
     'wallet_txn_clone.py --segwit',
     'rpc_getchaintips.py',
     'rpc_misc.py',
+    'p2p_1p1c_network.py',
+    'p2p_opportunistic_1p1c.py',
     'interface_rest.py',
     'mempool_spend_coinbase.py',
     'wallet_avoid_mixing_output_types.py --descriptors',
@@ -254,6 +249,7 @@ BASE_SCRIPTS = [
     'wallet_keypool.py --descriptors',
     'wallet_descriptor.py --descriptors',
     'p2p_nobloomfilter_messages.py',
+    TEST_FRAMEWORK_UNIT_TESTS,
     'p2p_filter.py',
     'rpc_setban.py --v1transport',
     'rpc_setban.py --v2transport',
@@ -291,6 +287,7 @@ BASE_SCRIPTS = [
     'p2p_leak_tx.py --v1transport',
     'p2p_leak_tx.py --v2transport',
     'p2p_eviction.py',
+    'p2p_outbound_eviction.py',
     'p2p_ibd_stalling.py --v1transport',
     'p2p_ibd_stalling.py --v2transport',
     'p2p_net_deadlock.py --v1transport',
@@ -439,7 +436,8 @@ def main():
     parser.add_argument('--tmpdirprefix', '-t', default=tempfile.gettempdir(), help="Root directory for datadirs")
     parser.add_argument('--failfast', '-F', action='store_true', help='stop execution after the first test failure')
     parser.add_argument('--filter', help='filter scripts to run by regular expression')
-    parser.add_argument('--skipunit', '-u', action='store_true', help='skip unit tests for the test framework')
+    parser.add_argument("--nocleanup", dest="nocleanup", default=False, action="store_true",
+                        help="Leave bitcoinds and test.* datadir on exit or error")
 
 
     args, unknown_args = parser.parse_known_args()
@@ -534,6 +532,13 @@ def main():
         subprocess.check_call([sys.executable, os.path.join(config["environment"]["SRCDIR"], 'test', 'functional', test_list[0].split()[0]), '-h'])
         sys.exit(0)
 
+    # Warn if there is not enough space on tmpdir to run the tests with --nocleanup
+    if args.nocleanup:
+        if shutil.disk_usage(tmpdir).free < MIN_NO_CLEANUP_SPACE:
+            print(f"{BOLD[1]}WARNING!{BOLD[0]} There may be insufficient free space in {tmpdir} to run the functional test suite with --nocleanup. "
+                  f"A minimum of {MIN_NO_CLEANUP_SPACE // (1024 * 1024 * 1024)} GB of free space is required.")
+        passon_args.append("--nocleanup")
+
     check_script_list(src_dir=config["environment"]["SRCDIR"], fail_on_warn=args.ci)
     check_script_prefixes()
 
@@ -551,10 +556,9 @@ def main():
         combined_logs_len=args.combinedlogslen,
         failfast=args.failfast,
         use_term_control=args.ansi,
-        skipunit=args.skipunit,
     )
 
-def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, enable_coverage=False, args=None, combined_logs_len=0, failfast=False, use_term_control, skipunit=False):
+def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, enable_coverage=False, args=None, combined_logs_len=0, failfast=False, use_term_control):
     args = args or []
 
     # Warn if bitcoind is already running
@@ -571,20 +575,16 @@ def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, enable_coverage=
     if os.path.isdir(cache_dir):
         print("%sWARNING!%s There is a cache directory here: %s. If tests fail unexpectedly, try deleting the cache directory." % (BOLD[1], BOLD[0], cache_dir))
 
+    # Warn if there is not enough space on the testing dir
+    min_space = MIN_FREE_SPACE + (jobs - 1) * ADDITIONAL_SPACE_PER_JOB
+    if shutil.disk_usage(tmpdir).free < min_space:
+        print(f"{BOLD[1]}WARNING!{BOLD[0]} There may be insufficient free space in {tmpdir} to run the Bitcoin functional test suite. "
+              f"Running the test suite with fewer than {min_space // (1024 * 1024)} MB of free space might cause tests to fail.")
 
     tests_dir = src_dir + '/test/functional/'
     # This allows `test_runner.py` to work from an out-of-source build directory using a symlink,
     # a hard link or a copy on any platform. See https://github.com/bitcoin/bitcoin/pull/27561.
     sys.path.append(tests_dir)
-
-    if not skipunit:
-        print("Running Unit Tests for Test Framework Modules")
-        test_framework_tests = unittest.TestSuite()
-        for module in TEST_FRAMEWORK_MODULES:
-            test_framework_tests.addTest(unittest.TestLoader().loadTestsFromName("test_framework.{}".format(module)))
-        result = unittest.TextTestRunner(verbosity=1, failfast=True).run(test_framework_tests)
-        if not result.wasSuccessful():
-            sys.exit("Early exiting after failure in TestFramework unit tests")
 
     flags = ['--cachedir={}'.format(cache_dir)] + args
 
@@ -648,6 +648,11 @@ def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, enable_coverage=
                 if failfast:
                     logging.debug("Early exiting after test failure")
                     break
+
+                if "[Errno 28] No space left on device" in stdout:
+                    sys.exit(f"Early exiting after test failure due to insuffient free space in {tmpdir}\n"
+                             f"Test execution data left in {tmpdir}.\n"
+                             f"Additional storage is needed to execute testing.")
 
     print_results(test_results, max_len_name, (int(time.time() - start_time)))
 

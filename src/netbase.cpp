@@ -3,9 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#if defined(HAVE_CONFIG_H)
-#include <config/bitcoin-config.h>
-#endif
+#include <config/bitcoin-config.h> // IWYU pragma: keep
 
 #include <netbase.h>
 
@@ -632,10 +630,7 @@ std::unique_ptr<Sock> ConnectDirectly(const CService& dest, bool manual_connecti
 
 std::unique_ptr<Sock> Proxy::Connect() const
 {
-    if (!IsValid()) {
-        LogPrintf("Cannot connect to invalid Proxy\n");
-        return {};
-    }
+    if (!IsValid()) return {};
 
     if (!m_is_unix_socket) return ConnectDirectly(proxy, /*manual_connection=*/true);
 
@@ -656,7 +651,6 @@ std::unique_ptr<Sock> Proxy::Connect() const
     socklen_t len = sizeof(addrun);
 
     if(!ConnectToSocket(*sock, (struct sockaddr*)&addrun, len, path, /*manual_connection=*/true)) {
-        LogPrintf("Cannot connect to socket for %s\n", path);
         return {};
     }
 

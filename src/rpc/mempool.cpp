@@ -671,12 +671,12 @@ UniValue MempoolInfoToJSON(const CTxMemPool& pool)
     ret.pushKV("bytes", (int64_t)pool.GetTotalTxSize());
     ret.pushKV("usage", (int64_t)pool.DynamicMemoryUsage());
     ret.pushKV("total_fee", ValueFromAmount(pool.GetTotalFee()));
-    ret.pushKV("maxmempool", pool.m_max_size_bytes);
-    ret.pushKV("mempoolminfee", ValueFromAmount(std::max(pool.GetMinFee(), pool.m_min_relay_feerate).GetFeePerK()));
-    ret.pushKV("minrelaytxfee", ValueFromAmount(pool.m_min_relay_feerate.GetFeePerK()));
-    ret.pushKV("incrementalrelayfee", ValueFromAmount(pool.m_incremental_relay_feerate.GetFeePerK()));
+    ret.pushKV("maxmempool", pool.m_opts.max_size_bytes);
+    ret.pushKV("mempoolminfee", ValueFromAmount(std::max(pool.GetMinFee(), pool.m_opts.min_relay_feerate).GetFeePerK()));
+    ret.pushKV("minrelaytxfee", ValueFromAmount(pool.m_opts.min_relay_feerate.GetFeePerK()));
+    ret.pushKV("incrementalrelayfee", ValueFromAmount(pool.m_opts.incremental_relay_feerate.GetFeePerK()));
     ret.pushKV("unbroadcastcount", uint64_t{pool.GetUnbroadcastTxs().size()});
-    ret.pushKV("fullrbf", pool.m_full_rbf);
+    ret.pushKV("fullrbf", pool.m_opts.full_rbf);
     return ret;
 }
 
@@ -813,13 +813,14 @@ static RPCHelpMan submitpackage()
 {
     return RPCHelpMan{"submitpackage",
         "Submit a package of raw transactions (serialized, hex-encoded) to local node.\n"
-        "The package must consist of a child with its parents, and none of the parents may depend on one another.\n"
         "The package will be validated according to consensus and mempool policy rules. If any transaction passes, it will be accepted to mempool.\n"
         "This RPC is experimental and the interface may be unstable. Refer to doc/policy/packages.md for documentation on package policies.\n"
         "Warning: successful submission does not mean the transactions will propagate throughout the network.\n"
         ,
         {
-            {"package", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of raw transactions.",
+            {"package", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of raw transactions.\n"
+                "The package must solely consist of a child and its parents. None of the parents may depend on each other.\n"
+                "The package must be topologically sorted, with the child being the last element in the array.",
                 {
                     {"rawtx", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, ""},
                 },
@@ -860,15 +861,15 @@ static RPCHelpMan submitpackage()
             },
         },
         RPCExamples{
-            HelpExampleCli("testmempoolaccept", "[rawtx1, rawtx2]") +
-            HelpExampleCli("submitpackage", "[rawtx1, rawtx2]")
+            HelpExampleRpc("submitpackage", R"(["rawtx1", "rawtx2"])") +
+            HelpExampleCli("submitpackage", R"('["rawtx1", "rawtx2"]')")
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
             const UniValue raw_transactions = request.params[0].get_array();
-            if (raw_transactions.size() < 1 || raw_transactions.size() > MAX_PACKAGE_COUNT) {
+            if (raw_transactions.size() < 2 || raw_transactions.size() > MAX_PACKAGE_COUNT) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
-                                   "Array must contain between 1 and " + ToString(MAX_PACKAGE_COUNT) + " transactions.");
+                                   "Array must contain between 2 and " + ToString(MAX_PACKAGE_COUNT) + " transactions.");
             }
 
             // Fee check needs to be run with chainstate and package context
@@ -994,10 +995,8 @@ static RPCHelpMan submitpackage()
                         fees.pushKV("effective-includes", effective_includes_res);
                     }
                     result_inner.pushKV("fees", fees);
-                    if (it->second.m_replaced_transactions.has_value()) {
-                        for (const auto& ptx : it->second.m_replaced_transactions.value()) {
-                            replaced_txids.insert(ptx->GetHash());
-                        }
+                    for (const auto& ptx : it->second.m_replaced_transactions) {
+                        replaced_txids.insert(ptx->GetHash());
                     }
                     break;
                 }

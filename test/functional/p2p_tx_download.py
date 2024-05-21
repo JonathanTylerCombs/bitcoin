@@ -8,6 +8,9 @@ Test transaction download behavior
 from decimal import Decimal
 import time
 
+from test_framework.mempool_util import (
+    fill_mempool,
+)
 from test_framework.messages import (
     CInv,
     MSG_TX,
@@ -24,7 +27,6 @@ from test_framework.p2p import (
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
-    fill_mempool,
 )
 from test_framework.wallet import MiniWallet
 
@@ -248,7 +250,7 @@ class TxDownloadTest(BitcoinTestFramework):
     def test_rejects_filter_reset(self):
         self.log.info('Check that rejected tx is not requested again')
         node = self.nodes[0]
-        fill_mempool(self, node, self.wallet)
+        fill_mempool(self, node)
         self.wallet.rescan_utxos()
         mempoolminfee = node.getmempoolinfo()['mempoolminfee']
         peer = node.add_p2p_connection(TestP2PConn())
@@ -284,17 +286,22 @@ class TxDownloadTest(BitcoinTestFramework):
 
         # Run each test against new bitcoind instances, as setting mocktimes has long-term effects on when
         # the next trickle relay event happens.
-        for test in [self.test_in_flight_max, self.test_inv_block, self.test_tx_requests,
-                     self.test_rejects_filter_reset]:
+        for test, with_inbounds in [
+            (self.test_in_flight_max, True),
+            (self.test_inv_block, True),
+            (self.test_tx_requests, True),
+            (self.test_rejects_filter_reset, False),
+        ]:
             self.stop_nodes()
             self.start_nodes()
             self.connect_nodes(1, 0)
             # Setup the p2p connections
             self.peers = []
-            for node in self.nodes:
-                for _ in range(NUM_INBOUND):
-                    self.peers.append(node.add_p2p_connection(TestP2PConn()))
-            self.log.info("Nodes are setup with {} incoming connections each".format(NUM_INBOUND))
+            if with_inbounds:
+                for node in self.nodes:
+                    for _ in range(NUM_INBOUND):
+                        self.peers.append(node.add_p2p_connection(TestP2PConn()))
+                self.log.info("Nodes are setup with {} incoming connections each".format(NUM_INBOUND))
             test()
 
 
